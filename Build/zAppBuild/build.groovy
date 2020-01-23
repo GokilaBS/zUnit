@@ -17,6 +17,7 @@ import groovy.xml.*
 @Field def impactUtils= loadScript(new File("utilities/ImpactUtilities.groovy"))
 @Field String hashPrefix = ':githash:'
 @Field RepositoryClient repositoryClient
+@Field userBuildComp = false
 
 // start time message
 def startTime = new Date()
@@ -35,6 +36,15 @@ if (buildList.size() == 0)
 	println("*! No files in build list.  Nothing to do.")
 else {
 	if (!props.scanOnly) {
+                // Resolve test cases and add to build list
+		def testcases = []
+		if ( props.userBuild || props.zUnit ) {
+			buildList.each { file ->
+				println("** Add test case for $file")
+				testcases += BuildProperties.getFilePropertyPatterns("zUnitTestCases", file)
+			}
+		}
+
 		println("** Invoking build scripts according to build order: ${props.buildOrder}")
 		String[] buildOrder = props.buildOrder.split(',')
 		buildOrder.each { script ->
@@ -43,6 +53,15 @@ else {
 			runScript(new File("languages/${script}"), ['buildList':buildFiles])
 			processCounter = processCounter + buildFiles.size()
 		}
+
+                if ( props.userBuild || props.zUnit ) {
+			def testOrder = ["ZUNIT.groovy"]
+			println("** Invoking test cases according to test order: ${testOrder}")
+			testOrder.each { script ->
+				def testFiles = ScriptMappings.getMappedList(script, testcases)
+				runScript(new File("zunit/${script}"), ['testFiles':testFiles])
+                        }
+                }
 	}
 }
 
@@ -52,7 +71,7 @@ if (processCounter == 0)
 	
 finalizeBuildProcess(start:startTime, count:processCounter)
 
-// if error occurred signal process error 
+// if error occurred signal process error
 if (props.error)
 	System.exit(1)
 
@@ -142,7 +161,7 @@ def initializeBuildProcess(String[] args) {
  */
 def parseArgs(String[] args) {
 	String usage = 'build.groovy [options] buildfile'
-	String header =  '''buildFile (optional):  Path of the file to build. \
+	String header =  '''buildFile (optional):  Path of the file to build.
 If buildFile is a text file (*.txt) then it is assumed to be a build list file.
 options:
 	'''
@@ -150,7 +169,7 @@ options:
 	def cli = new CliBuilder(usage:usage,header:header)
 	// required sandbox options
 	cli.w(longOpt:'workspace', args:1, 'Absolute path to workspace (root) directory containing all required source directories')
-	cli.a(longOpt:'application', args:1, required:true, 'Application directory name (relative to workspace)')
+	cli.a(longOpt:'application', args:1, 'Application directory name (relative to workspace)')
 	cli.o(longOpt:'outDir', args:1, 'Absolute path to the build output root directory')
 	cli.h(longOpt:'hlq', args:1, required:true, 'High level qualifier for partition data sets')
 	
@@ -181,6 +200,16 @@ options:
 	
 	// utility options
 	cli.help(longOpt:'help', 'Prints this message')
+
+        // other options
+	cli.repoUrl(longOpt:'repoUrl', args:1, 'The binary repository URL')
+	cli.buildNb(longOpt:'buildNb', args:1, 'The build number')
+
+        // zUnit option
+	cli.z(longOpt:'zUnit', 'Flag to indicate that zUnit must run in all cases')
+
+        // Build ZAR option
+	cli.zar(longOpt:'zarFile', 'Flag to indicate that we want to build the zar file')
 	
 	def opts = cli.parse(args)
 	if (!opts) {
@@ -209,13 +238,29 @@ def populateBuildProperties(String[] args) {
 	def opts = parseArgs(args)
 	def zAppBuildDir =  getScriptDir()
 	props.zAppBuildDir = zAppBuildDir
+
+        // IDz old user build implementation
+	
+	userBuildComp = !opts.w && !opts.a && opts.u
 	
 	// set required command line arguments
 	if (opts.w) props.workspace = opts.w
 	if (opts.o) props.outDir = opts.o
 	if (opts.a) props.application = opts.a
 	if (opts.h) props.hlq = opts.h
+
+        // set zUnit option to force zUnit.
+	if (opts.z) props.zUnit = 'true'
 	
+        // set zar option to force zar file creation.
+	if (opts.zar) props.zarFile = 'true'
+	
+	if (userBuildComp && opts.arguments()) {
+		 props.application = opts.arguments()[0].trim().split("/")[0]
+	} else {
+		buildUtils.assertBuildProperties('application')
+	}
+
 	// need to support IDz user build parameters
 	if (opts.srcDir) props.workspace = opts.srcDir
 	if (opts.wrkDir) props.outDir = opts.wrkDir
@@ -244,8 +289,10 @@ def populateBuildProperties(String[] args) {
 	if (!appConfRootDir.endsWith('/'))
 		appConfRootDir = "${appConfRootDir}/"
 		
-	String appConf = "${appConfRootDir}${props.application}/application-conf"
+	String appConf = "${appConfRootDir}${props.application}/zAppBuild/application/application-conf"
+
 	if (opts.v) println "** appConf = ${appConf}"
+
 	props.load(new File("${appConf}/application.properties"))
 	
 	// load additional application property files
@@ -286,7 +333,7 @@ def populateBuildProperties(String[] args) {
 	if (opts.pf) props.pf = opts.pf
 	
 	// set debug flag
-	if(opts.d) props.debug = 'true' 
+	if(opts.d) props.debug = 'true'
 	
 	// set DBB configuration properties
 	if (opts.url) props.'dbb.RepositoryClient.url' = opts.url
@@ -297,7 +344,7 @@ def populateBuildProperties(String[] args) {
 	// set IDz/ZOD user build options
 	if (opts.e) props.errPrefix = opts.e
 	if (opts.u) props.userBuild = 'true'
-	if (opts.t) props.team = opts.t
+        	if (opts.t) props.team = opts.t
 	
 	// set build file from first non-option argument
 	if (opts.arguments()) props.buildFile = opts.arguments()[0].trim()
@@ -305,7 +352,7 @@ def populateBuildProperties(String[] args) {
 	// set calculated properties
 	if (!props.userBuild) {
 		def gitDir = buildUtils.getAbsolutePath(props.application)
-		if ( gitUtils.isGitDetachedHEAD(gitDir) ) 
+		if ( gitUtils.isGitDetachedHEAD(gitDir) )
 			props.applicationCurrentBranch = gitUtils.getCurrentGitDetachedBranch(gitDir)
 		else
 			props.applicationCurrentBranch = gitUtils.getCurrentGitBranch(gitDir)
@@ -345,7 +392,7 @@ def createDatasets(String[] datasets, String options) {
 *   - full build : Contains all programs in application and external directories. Use script option --fullBuild
 *   - impact build : Contains impacted programs from calculated changed files. Use script option --impactBuild
 *   - build file : Contains one program. Provide a build file argument.
-*   - build text file: Contains a list of programs from a text file. Provide a *.txt build file argument. 
+*   - build text file: Contains a list of programs from a text file. Provide a *.txt build file argument.
 */
 def createBuildList() {
 	
@@ -445,7 +492,7 @@ def finalizeBuildProcess(Map args) {
 	if (repositoryClient) {
 		if (props.verbose)
 			println "** Updating build result BuildGroup:${props.applicationBuildGroup} BuildLabel:${props.applicationBuildLabel}"
-		def buildResult = repositoryClient.getBuildResult(props.applicationBuildGroup, props.applicationBuildLabel) 
+		def buildResult = repositoryClient.getBuildResult(props.applicationBuildGroup, props.applicationBuildLabel)
 		buildResult.setBuildReport(new FileInputStream(htmlOutputFile))
 		buildResult.setBuildReportData(new FileInputStream(jsonOutputFile))
 		buildResult.setProperty("filesProcessed", String.valueOf(args.count))
@@ -474,6 +521,10 @@ def finalizeBuildProcess(Map args) {
 		buildResult.save()
 	
 	}
+
+        // build the application package
+	if ( props.zarFile || ( !props.userBuild && props.repoUrl ) )
+		packageUtils.createApplicationPackage();
 	
 	// print end build message
 	def endTime = new Date()
